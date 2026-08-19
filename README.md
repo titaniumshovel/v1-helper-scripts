@@ -173,7 +173,7 @@ JSON line to stdout (schema `uet-result/3`) with an `outcome` field:
   `hostName` is whatever the host called itself at registration; a host that
   was resolving itself via public DNS gets recorded under its **ISP
   reverse-DNS name** (e.g. `syn-203-000-113-043.biz.example-isp.com` resolving
-  to `198.51.100.137`). Dialling that name would hand the payload — and the
+  to `9.9.9.9`). Dialling that name would hand the payload — and the
   tenant activation token it carries — to an unrelated host on the public
   internet. So for `ssh`/`winrm`:
   1. A private worklist IP (`lastIPUsed`) is preferred over the hostname, and

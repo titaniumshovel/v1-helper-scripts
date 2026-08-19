@@ -4,6 +4,7 @@ import inspect
 import json
 import os
 import re
+import socket
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
@@ -81,7 +82,7 @@ def resolve_targets(todo: list[WorklistItem], transport_name: str, results_dir: 
     kept: list[WorklistItem] = []
     targets: dict[str, str] = {}
     for item in todo:
-        target, err = check_target(item, cfg.allowed_cidrs)
+        target, err = check_target(item, cfg.allowed_cidrs, resolve=socket.gethostbyname)
         if err and not allow_public_target:
             os.makedirs(results_dir, exist_ok=True)
             safe = _safe_name(item.hostname)

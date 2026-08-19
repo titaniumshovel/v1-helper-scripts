@@ -26,7 +26,7 @@ class TestIsAllowedIp:
     def test_private_allowed(self, ip):
         assert is_allowed_ip(ip)
 
-    @pytest.mark.parametrize("ip", ["203.0.113.43", "8.8.8.8", "1.1.1.1"])
+    @pytest.mark.parametrize("ip", ["9.9.9.9", "8.8.8.8", "1.1.1.1"])
     def test_public_refused(self, ip):
         assert not is_allowed_ip(ip)
 
@@ -35,8 +35,8 @@ class TestIsAllowedIp:
         assert not is_allowed_ip(ip)
 
     def test_public_allowed_when_cidr_configured(self):
-        assert is_allowed_ip("203.0.113.43", ["203.0.113.0/24"])
-        assert not is_allowed_ip("8.8.8.8", ["203.0.113.0/24"])
+        assert is_allowed_ip("9.9.9.9", ["9.9.9.0/24"])
+        assert not is_allowed_ip("8.8.8.8", ["9.9.9.0/24"])
 
     def test_invalid_configured_cidr_fails_fast(self):
         with pytest.raises(SystemExit):
@@ -53,9 +53,9 @@ class TestCheckTarget:
 
     def test_isp_hostname_with_no_private_ip_is_refused(self):
         item = wi("syn-203-000-113-043.biz.example-isp.com", [])
-        target, err = check_target(item, resolve=lambda n: "203.0.113.43")
+        target, err = check_target(item, resolve=lambda n: "9.9.9.9")
         assert target is None
-        assert "203.0.113.43" in err
+        assert "9.9.9.9" in err
         assert "public internet" in err
 
     def test_hostname_resolving_privately_is_allowed(self):
@@ -64,9 +64,9 @@ class TestCheckTarget:
         assert (target, err) == ("realhost.internal.example.com", None)
 
     def test_public_worklist_ip_alone_is_not_enough(self):
-        item = wi("syn-203-000-113-043.biz.example-isp.com", ["203.0.113.43"])
-        target, err = check_target(item, resolve=lambda n: "203.0.113.43")
-        assert target is None and "203.0.113.43" in err
+        item = wi("syn-203-000-113-043.biz.example-isp.com", ["9.9.9.9"])
+        target, err = check_target(item, resolve=lambda n: "9.9.9.9")
+        assert target is None and "9.9.9.9" in err
 
     def test_unresolvable_hostname_with_no_private_ip_is_refused(self):
         def boom(name):
@@ -85,12 +85,12 @@ class TestCheckTarget:
 
     def test_configured_cidr_permits_the_isp_range(self):
         item = wi("syn-203-000-113-043.biz.example-isp.com", [])
-        target, err = check_target(item, ["203.0.113.0/24"],
-                                   resolve=lambda n: "203.0.113.43")
+        target, err = check_target(item, ["9.9.9.0/24"],
+                                   resolve=lambda n: "9.9.9.9")
         assert err is None and target == "syn-203-000-113-043.biz.example-isp.com"
 
     def test_first_private_ip_is_picked_over_a_public_one(self):
-        item = wi("h", ["203.0.113.43", "10.0.0.9"])
+        item = wi("h", ["9.9.9.9", "10.0.0.9"])
         target, err = check_target(item, resolve=never)
         assert (target, err) == ("10.0.0.9", None)
 
@@ -104,7 +104,7 @@ class TestResolveTargets:
         return kept, targets, results_dir
 
     def test_refused_host_is_dropped_and_gets_an_error_file(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("socket.gethostbyname", lambda n: "203.0.113.43")
+        monkeypatch.setattr("socket.gethostbyname", lambda n: "9.9.9.9")
         bad = wi("syn-203-000-113-043.biz.example-isp.com", [])
         kept, targets, results_dir = self._run(tmp_path, [bad])
         assert kept == [] and targets == {}
@@ -118,22 +118,22 @@ class TestResolveTargets:
         assert targets[good.hostname] == "198.51.100.137"
 
     def test_override_lets_a_public_host_through_as_hostname(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("socket.gethostbyname", lambda n: "203.0.113.43")
+        monkeypatch.setattr("socket.gethostbyname", lambda n: "9.9.9.9")
         bad = wi("syn-203-000-113-043.biz.example-isp.com", [])
         kept, targets, _ = self._run(tmp_path, [bad], allow=True)
         assert kept == [bad]
         assert targets[bad.hostname] == bad.hostname
 
     def test_configured_cidr_is_honoured(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("socket.gethostbyname", lambda n: "203.0.113.43")
+        monkeypatch.setattr("socket.gethostbyname", lambda n: "9.9.9.9")
         cfg = Config()
-        cfg.allowed_cidrs = ["203.0.113.0/24"]
+        cfg.allowed_cidrs = ["9.9.9.0/24"]
         bad = wi("syn-203-000-113-043.biz.example-isp.com", [])
         kept, _, _ = self._run(tmp_path, [bad], cfg=cfg)
         assert kept == [bad]
 
     def test_ssm_is_never_gated(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("socket.gethostbyname", lambda n: "203.0.113.43")
+        monkeypatch.setattr("socket.gethostbyname", lambda n: "9.9.9.9")
         # ssm resolves via the EC2 API, not DNS, so a public-resolving hostname
         # cannot misroute it — it must not be filtered.
         bad = wi("syn-203-000-113-043.biz.example-isp.com", [])
