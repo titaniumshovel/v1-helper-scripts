@@ -1,0 +1,16 @@
+workdir = "uet-data"
+
+[v1]
+base_url = "https://api.xdr.trendmicro.com"
+
+[swp]
+base_url = "https://workload.us-1.cloudone.trendmicro.com"
+
+[triage]
+stale_days = 90
+snapshot_max_age_hours = 12
+
+[run]
+concurrency = 10
+ssh_user = "uetadmin"
+# ssm_region = "us-east-1"
