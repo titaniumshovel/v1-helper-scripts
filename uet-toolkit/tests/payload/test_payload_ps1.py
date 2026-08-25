@@ -514,7 +514,61 @@ def test_heartbeat_failure_is_caught_even_when_exit_status_is_zero_ps1(tmp_path)
     assert res["checks"]["heartbeat_result"] == "failed"
     assert "heartbeat_failed" in res["notes"]
     assert "manager_rejected_untrusted_peer" in res["notes"]
+    assert "local_peer_auth_403" not in res["notes"]
+    assert res["checks"]["hb"] == "manager_rejected_untrusted_peer"
     assert res["outcome"] == "DEGRADED"
+
+
+def test_loopback_untrusted_403_is_local_not_manager_reject_ps1(tmp_path):
+    # Live case (2026-08-25): a host whose forced heartbeat answered
+    # "403 - Forbidden - untrusted peer." on the agent's OWN loopback server
+    # held no manager-reject event, and its scheduler sessions were all HTTP
+    # 200. A 403 string alone cannot carry the mgr-reject note when the error
+    # is a local peer-auth refusal on port 4118 / "not allowed".
+    proc, res = _run_win_rev5(
+        tmp_path,
+        dsa_control_body='if ($args[0] -eq "-m") {\n'
+                         '  Write-Output "Process not authenticated (Executable \'cmd.exe\' not allowed)"\n'
+                         '  Write-Output "Incoming connection on interface :::4118"\n'
+                         '  Write-Output "HTTP Status: 403 - Forbidden - untrusted peer."\n'
+                         '  exit 1\n}\n'
+                         'Write-Output "ctl $args"\n')
+    assert res["checks"]["heartbeat_result"] == "failed"
+    assert "heartbeat_failed" in res["notes"]
+    assert "local_peer_auth_403" in res["notes"]
+    assert "manager_rejected_untrusted_peer" not in res["notes"]
+    assert res["checks"]["hb"] == "local_peer_auth_403"
+    assert res["outcome"] == "DEGRADED"
+
+
+def test_fresh_heartbeat_with_403_is_local_artifact_ps1(tmp_path):
+    # A forced check-in that returns a 403 on a host whose scheduler session
+    # is FRESH means the manager accepts this agent — so the 403 is a local
+    # peer-auth artifact, never a manager reject. The age is the tiebreaker.
+    proc, res = _run_win_rev5(tmp_path, status_output=WIN_FRESH_QUERY_OUTPUT,
+                              dsa_control_body='if ($args[0] -eq "-m") {\n'
+                                               '  Write-Output "HTTP Status: 403 - '
+                                               'Forbidden - untrusted peer."\n'
+                                               '  exit 1\n}\n'
+                                               'Write-Output "ctl $args"\n')
+    assert res["checks"]["heartbeat_result"] == "failed"
+    assert "heartbeat_failed" in res["notes"]
+    assert "local_peer_auth_403" in res["notes"]
+    assert "manager_rejected_untrusted_peer" not in res["notes"]
+    assert res["checks"]["hb"] == "local_peer_auth_403"
+    assert res["outcome"] == "DEGRADED"
+
+
+def test_fresh_heartbeat_ok_with_no_403_is_fine_ps1(tmp_path):
+    # A clean forced check-in on a fresh host: heartbeat_result ok, no 403, hb
+    # stays as the age-fresh confirmation (ok_fresh), outcome NO_ACTION_NEEDED.
+    proc, res = _run_win_rev5(tmp_path, status_output=WIN_FRESH_QUERY_OUTPUT)
+    assert res["checks"]["heartbeat_result"] == "ok"
+    assert res["checks"]["heartbeat_age_sec"] == 401
+    assert res["checks"]["hb"] == "ok_fresh"
+    assert "manager_rejected_untrusted_peer" not in res["notes"]
+    assert "local_peer_auth_403" not in res["notes"]
+    assert res["outcome"] == "NO_ACTION_NEEDED"
 
 
 def test_heartbeat_that_does_not_advance_the_session_is_unconfirmed_ps1(tmp_path):

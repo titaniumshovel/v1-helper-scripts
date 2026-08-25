@@ -58,7 +58,7 @@ $Checks = [ordered]@{ installed = $false; service_running = $false; activated = 
              agent_version_source = ""; agent_state = ""; driver_hooked = ""; driver_checked = "";
              au_status = ""; heartbeat_age_sec = $null; heartbeat_result = ""; heartbeat_error = "";
              am_mode = "unknown"; am_evidence = ""; am_engine_atse = ""; am_patterns = "";
-             agent_status_raw = ""; component_info_raw = "" }
+             agent_status_raw = ""; component_info_raw = ""; hb = "" }
 $Outcome = "ERROR"
 $script:Foreign = $false
 $script:Emitted = $false
@@ -414,6 +414,7 @@ function Send-Heartbeat {
     $before = $Checks.heartbeat_age_sec
     $Checks.heartbeat_result = ""
     $Checks.heartbeat_error = ""
+    $Checks.hb = ""
     $out = Invoke-AgentTool "dsa_control" @("-m")
     $rc = $script:LastToolExit
     if ("$out".Trim()) { Write-Log "dsa_control -m: $("$out".Trim())" }
@@ -422,17 +423,54 @@ function Send-Heartbeat {
     if ($null -ne $rc -and $rc -ne 0) { $failed = $true }
     $m = [regex]::Match("$out", 'HTTP Status:\s*(\d{3})')
     if ($m.Success -and $m.Groups[1].Value -notmatch '^2') { $failed = $true }
+    # "untrusted peer" on a forced check-in is ambiguous between a manager-side
+    # reject (documented events 771 "Contact by Unrecognized Client" / 716
+    # "Reactivation Attempted by Unknown Agent") and the agent's own local
+    # loopback management server (port 4118) refusing the forced heartbeat from
+    # a local process it does not recognize as authenticated — live-verified on
+    # a host whose routine scheduler sessions to the manager were all HTTP 200
+    # while its forced `dsa_control -m` answered "403 - Forbidden - untrusted
+    # peer." on the loopback listener. The scheduler heartbeat age is the
+    # tiebreaker: a manager that accepts the agent's own sessions (age fresh)
+    # did not just reject it per-check-in — a 403 then is a local peer-auth
+    # artifact. Only a 403 with a stale session is a manager-reject candidate.
+    $stale = if ($env:UET_HEARTBEAT_STALE_SECS) { [long]$env:UET_HEARTBEAT_STALE_SECS } else { 1800 }
+    $loopback = ("$out" -match '(?i)untrusted peer') -and ("$out" -match '(?i)loopback|4118|not allowed')
     if ($failed) {
         $Checks.heartbeat_result = "failed"
         $first = (("$out" -split "`n") | Where-Object { $_.Trim() } | Select-Object -First 1)
         if (-not "$first".Trim()) { $first = "dsa_control -m exited $rc" }
         $Checks.heartbeat_error = "$first".Trim().Substring(0, [Math]::Min(200, "$first".Trim().Length))
         Add-Note "heartbeat_failed"
-        # "untrusted peer" maps to documented events 771 (Contact by Unrecognized
-        # Client) / 716 (Reactivation Attempted by Unknown Agent) and its fix is
-        # manager-side reactivation settings, not a restart — so it earns a note
-        # of its own. Keyed on the observed error STRING, not on a status enum.
-        if ("$out" -match '(?i)untrusted peer') { Add-Note "manager_rejected_untrusted_peer" }
+        # Poll the agent's own session age so the classification reads the
+        # CURRENT freshness, not the stale value captured before the forced
+        # check-in.
+        $tries = if ($env:UET_HEARTBEAT_CONFIRM_TRIES) { [int]$env:UET_HEARTBEAT_CONFIRM_TRIES } else { 3 }
+        while ($tries -gt 0) {
+            Start-Sleep -Seconds (Get-SleepSecs 5)
+            Invoke-Diagnose
+            if ($Checks.heartbeat_age_sec -ne $null) { break }
+            $tries--
+        }
+        $age = $Checks.heartbeat_age_sec
+        if ("$out" -match '(?i)untrusted peer') {
+            if ($age -ne $null -and $age -lt $stale) {
+                # Session fresh -> manager accepts this agent -> not a reject.
+                $Checks.hb = "local_peer_auth_403"
+                Add-Note "local_peer_auth_403"
+            } elseif ($loopback) {
+                $Checks.hb = "local_peer_auth_403"
+                Add-Note "local_peer_auth_403"
+            } else {
+                # 403 + stale/unreadable session, no local markers -> the
+                # documented manager-side reject path (771/716); documented fix
+                # is reactivation settings, not a restart.
+                $Checks.hb = "manager_rejected_untrusted_peer"
+                Add-Note "manager_rejected_untrusted_peer"
+            }
+        } else {
+            $Checks.hb = "error"
+        }
         return
     }
 
@@ -446,8 +484,13 @@ function Send-Heartbeat {
         if ($Checks.heartbeat_age_sec -lt $before) { break }
         $tries--
     }
+    # A successful forced check-in whose scheduler session is fresh is NOT a
+    # manager reject; a loopback 403 in the utility output is then a local
+    # artifact and must not carry the mgr-reject note.
+    if ($Checks.heartbeat_age_sec -ne $null -and $Checks.heartbeat_age_sec -lt $stale) {
+        $Checks.hb = "ok_fresh"
+    }
     if ($null -eq $before -or $null -eq $Checks.heartbeat_age_sec) { return }
-    $stale = if ($env:UET_HEARTBEAT_STALE_SECS) { [long]$env:UET_HEARTBEAT_STALE_SECS } else { 1800 }
     if ($Checks.heartbeat_age_sec -ge $before -and $Checks.heartbeat_age_sec -gt $stale) {
         $Checks.heartbeat_result = "unconfirmed"
         Add-Note "heartbeat_not_confirmed"
@@ -479,6 +522,38 @@ function Invoke-CollectDiag {
             [void]$sb.AppendLine((Get-Content $_.FullName -Tail 200 -ErrorAction SilentlyContinue | Out-String))
         }
     } else { [void]$sb.AppendLine("  (diag dir not found)") }
+
+    # The heartbeat channel and the telemetry channel fail independently. A
+    # host whose scheduler heartbeats to the manager succeed (HTTP 200) can
+    # still be reporting "403 - Forbidden - untrusted peer." and "CA is not
+    # trusted"/"unknown authority" on the DSA-Connect / MQTT / iothub /
+    # Endpoint Basecamp path — live-verified on the host that motivated this.
+    # Capture the CA/trust evidence and the precise 403 context so the two
+    # reads are distinguishable without a second remote session.
+    $loguePatterns = @('untrusted peer', 'not allowed', 'HeartbeatNow', '4118',
+                      'iothub', 'DSA-Connect', 'CA is not trusted', 'install_root_ca',
+                      'unknown authority', 'getIothubData', 'healthz')
+    function Append-LogTail([System.Text.StringBuilder]$b, [string]$Path, [int]$Tail, [string[]]$Patterns) {
+        if (-not (Test-Path $Path)) { [void]$b.AppendLine("  (missing $Path)"); return }
+        [void]$b.AppendLine("  [$Path]")
+        $lines = Get-Content -Path $Path -Tail $Tail -ErrorAction SilentlyContinue
+        foreach ($l in $lines) {
+            if ($Patterns.Count -eq 0 -or ("$l" -match ($Patterns -join '|'))) { [void]$b.AppendLine($l) }
+        }
+    }
+    Append-LogTail $sb (Join-Path $diagDir "ds_agent.log") 200 $loguePatterns
+    Append-LogTail $sb (Join-Path $diagDir "ds_agent-err.log") 200 $loguePatterns
+    $xbc = Join-Path $pd "Trend Micro\Deep Security Agent\EndpointBasecamp.log"
+    Append-LogTail $sb $xbc 200 $loguePatterns
+
+    [void]$sb.AppendLine("--- Trusted Root Certification Authorities ---")
+    try {
+        $roots = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue
+        foreach ($c in $roots) {
+            [void]$sb.AppendLine("  thumbprint=$($c.Thumbprint) subject='$($c.Subject)' notafter=$($c.NotAfter)")
+        }
+        if (-not $roots) { [void]$sb.AppendLine("  (no Trusted Root entries readable)") }
+    } catch { [void]$sb.AppendLine("  (Trusted Root read failed: $($_.Exception.Message))") }
     try {
         Set-Content -Path $out -Value $sb.ToString() -Encoding UTF8
         $script:DiagFile = $out
