@@ -167,6 +167,39 @@ JSON line to stdout (schema `uet-result/3`) with an `outcome` field:
 | `CORRUPT_RESULT` | (`uet collect` only) a `uet-data/results/<host>.json` file exists but isn't valid JSON (e.g. a truncated copy). `uet collect` never aborts on this — it records the row and moves on. `uet run`'s resume logic only checks that the file *exists*, not that it parses, so delete the bad file before re-running that host or it will be skipped again |
 | `NOT_RUN` | (`uet collect` only) no result file (`.json` or `.error.txt`) exists yet for this worklist host |
 
+## PowerShell utilities
+
+`uet.ps1` is a PowerShell 5.1-compatible single-file port of the core config,
+API, matching, classification, triage, payload generation, run, collect, and
+delete flows. It is useful on Windows hosts where installing Python is not
+desirable. Run it explicitly with `-Command`:
+
+```powershell
+pwsh -File .\uet.ps1 -Command triage -Config .\uet.toml
+pwsh -File .\uet.ps1 -Command run -Transport ssh -Mode safe -DryRun
+pwsh -File .\uet.ps1 -Command collect -SettleAttempts 1
+pwsh -File .\uet.ps1 -Command delete -ApprovedCsv .\approved-stale.csv
+```
+
+The PowerShell port uses the same `V1_API_KEY` and `SWP_API_SECRET` environment
+variables as the Python CLI, or prompts for a missing key. Its `ssh` path is
+implemented; `ssm` is intentionally rejected rather than silently using a
+different target-resolution policy. Treat generated payloads and API keys as
+secrets.
+
+For a separate, dependency-free deletion-only flow, use `bulk-delete.ps1` with
+a CSV containing `swp_id,hostname`:
+
+```powershell
+pwsh -File .\bulk-delete.ps1 -Csv .\approved.csv -BaseUrl $env:SWP_BASE_URL
+# review the backup and preview, then:
+pwsh -File .\bulk-delete.ps1 -Csv .\approved.csv -BaseUrl $env:SWP_BASE_URL -Execute
+```
+
+It prompts for the SWP API key, writes a full record backup before any delete,
+defaults to dry-run, requires typing `DELETE` for execution, and reports
+per-record failures. `-SkipConfirmation` is available for automation only.
+
 ## Caveats
 
 - **`uet run` refuses to dial a hostname that resolves off-network.** SWP's
